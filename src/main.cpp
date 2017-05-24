@@ -1,4 +1,5 @@
 #include "PID.h"
+#include <algorithm>
 #include "json.hpp"
 #include <iostream>
 #include <math.h>
@@ -6,6 +7,58 @@
 
 // for convenience
 using json = nlohmann::json;
+
+bool TWIDDLE = false;
+
+enum State {
+  START,
+  HIGHER,
+  LOWER
+};
+
+struct Twiddle {
+  uint step = 0;
+  double best_err = 100000;
+  double total_err = 0;
+  std::vector<double> dp = {.1, .0001, 1};
+  uint param_index = 0;
+  State state = State::START;
+};
+
+void UpdateTwiddle(Twiddle& twiddle, PID& pid) {
+  std::vector<double> p = {pid.Kp, pid.Ki, pid.Kd};
+  double current_err = twiddle.total_err; 
+  switch(twiddle.state) {
+   case State::START:
+    p[twiddle.param_index] += twiddle.dp[twiddle.param_index];
+    twiddle.state = State::HIGHER;
+    break;
+   case State::HIGHER:
+    if (current_err < twiddle.best_err) {
+      twiddle.best_err = current_err;
+      twiddle.dp[twiddle.param_index] *= 1.1;
+      twiddle.state = State::START;
+      twiddle.param_index = (twiddle.param_index + 1) % p.size();
+    } else {
+      p[twiddle.param_index] -= 2 * twiddle.dp[twiddle.param_index];
+      twiddle.state = State::LOWER; 
+    }
+    break;
+   case State::LOWER:
+    if (current_err < twiddle.best_err) {
+      twiddle.best_err = current_err;
+      twiddle.dp[twiddle.param_index] *= 1.1;
+    } else {
+      p[twiddle.param_index] += twiddle.dp[twiddle.param_index];
+      twiddle.dp[twiddle.param_index] *= 0.9;
+    }
+    twiddle.state = State::START;
+    twiddle.param_index = (twiddle.param_index + 1) & p.size();
+  }
+  pid.Init(std::max(0.0, p[0]),
+           std::max(0.0, p[1]),
+           std::max(0.0, p[2]));
+}
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() { return M_PI; }
@@ -31,13 +84,11 @@ int main() {
   uWS::Hub h;
 
   PID pid;
-  double Kp = 0.2;
-  double Ki = 3.0;
-  double Kd = 0.004;
-  pid.Init(Kp, Ki, Kd);
+  pid.Init(.41 , .000011 , 3.89);
+  int total_steps = 0;
+  Twiddle twiddle;
 
-  h.onMessage([&pid](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
-                     uWS::OpCode opCode) {
+  h.onMessage([&pid, &twiddle, &total_steps](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message
     // event.
     // The 4 signifies a websocket message
@@ -48,14 +99,24 @@ int main() {
         auto j = json::parse(s);
         std::string event = j[0].get<std::string>();
         if (event == "telemetry") {
+          ++total_steps;
           // j[1] is the data JSON object
           double cte = std::stod(j[1]["cte"].get<std::string>());
           double speed = std::stod(j[1]["speed"].get<std::string>());
           double angle = std::stod(j[1]["steering_angle"].get<std::string>());
           double steer_value;
-
           pid.UpdateError(cte);
           steer_value = pid.TotalError();
+          if (TWIDDLE && total_steps > 1000) {
+            if (twiddle.step == 500) {
+              UpdateTwiddle(twiddle, pid);
+              twiddle.step = 0;
+              twiddle.total_err = 0;
+            } else {
+                twiddle.total_err += std::fabs(cte);
+            }
+            ++twiddle.step;
+          }
 
           // DEBUG
           std::cout << "CTE: " << cte << " Steering Value: " << steer_value

@@ -1,6 +1,5 @@
 #include "PID.h"
 
-using namespace std;
 
 PID::PID() { p_error = i_error = d_error = 0; }
 
